@@ -159,6 +159,7 @@ void FloatingJointModel::interpolate(const double* from, const double* to, const
 
 bool FloatingJointModel::satisfiesPositionBounds(const double* values, const Bounds& bounds, double margin) const
 {
+
   if (values[0] < bounds[0].min_position_ - margin || values[0] > bounds[0].max_position_ + margin)
     return false;
   if (values[1] < bounds[1].min_position_ - margin || values[1] > bounds[1].max_position_ + margin)
@@ -261,71 +262,45 @@ void FloatingJointModel::getVariableDefaultPositions(double* values, const Bound
 void FloatingJointModel::getVariableRandomPositions(random_numbers::RandomNumberGenerator& rng, double* values,
                                                     const Bounds& bounds) const
 {
-  if (bounds[0].max_position_ >= std::numeric_limits<double>::infinity() ||
-      bounds[0].min_position_ <= -std::numeric_limits<double>::infinity())
-    values[0] = 0.0;
-  else
-    values[0] = rng.uniformReal(bounds[0].min_position_, bounds[0].max_position_);
-  if (bounds[1].max_position_ >= std::numeric_limits<double>::infinity() ||
-      bounds[1].min_position_ <= -std::numeric_limits<double>::infinity())
-    values[1] = 0.0;
-  else
-    values[1] = rng.uniformReal(bounds[1].min_position_, bounds[1].max_position_);
-  if (bounds[2].max_position_ >= std::numeric_limits<double>::infinity() ||
-      bounds[2].min_position_ <= -std::numeric_limits<double>::infinity())
-    values[2] = 0.0;
-  else
-    values[2] = rng.uniformReal(bounds[2].min_position_, bounds[2].max_position_);
+    // Floating joint model has 3 translation dimensions.
+    for (size_t dim = 0; dim < 3; dim++)  {
+        double infty = std::numeric_limits<double>::infinity();
 
-  double q[4];
-  rng.quaternion(q);
-  values[3] = q[0];
-  values[4] = q[1];
-  values[5] = q[2];
-  values[6] = q[3];
+        if (bounds[dim].max_position_ >= infty || bounds[dim].min_position_ <= -infty) {
+            // Sampling infinite range undefined, fall back to 0.0.
+            values[dim] = 0.0;
+        } else {
+            values[dim] = rng.uniformReal(bounds[dim].min_position_, bounds[dim].max_position_);
+        }
+    }
+
+    // Write the quaternion into values[3..7]
+    rng.quaternion(values+3);
 }
 
 void FloatingJointModel::getVariableRandomPositionsNearBy(random_numbers::RandomNumberGenerator& rng, double* values,
                                                           const Bounds& bounds, const double* seed,
                                                           const double distance) const
 {
-  if (bounds[0].max_position_ >= std::numeric_limits<double>::infinity() ||
-      bounds[0].min_position_ <= -std::numeric_limits<double>::infinity())
-    values[0] = 0.0;
-  else
-    values[0] = rng.uniformReal(std::max(bounds[0].min_position_, seed[0] - distance),
-                                std::min(bounds[0].max_position_, seed[0] + distance));
-  if (bounds[1].max_position_ >= std::numeric_limits<double>::infinity() ||
-      bounds[1].min_position_ <= -std::numeric_limits<double>::infinity())
-    values[1] = 0.0;
-  else
-    values[1] = rng.uniformReal(std::max(bounds[1].min_position_, seed[1] - distance),
-                                std::min(bounds[1].max_position_, seed[1] + distance));
-  if (bounds[2].max_position_ >= std::numeric_limits<double>::infinity() ||
-      bounds[2].min_position_ <= -std::numeric_limits<double>::infinity())
-    values[2] = 0.0;
-  else
-    values[2] = rng.uniformReal(std::max(bounds[2].min_position_, seed[2] - distance),
-                                std::min(bounds[2].max_position_, seed[2] + distance));
+    for (size_t dim = 0; dim < 3; dim++)  {
+        // Sample range is radius around seed, bounded by bounds.
+        values[dim] = rng.uniformReal(std::max(bounds[dim].min_position_, seed[dim] - distance),
+                                    std::min(bounds[dim].max_position_, seed[dim] + distance));
+    }
 
-  double da = angular_distance_weight_ * distance;
-  if (da >= .25 * boost::math::constants::pi<double>())
+  double angular_sample_radius = angular_distance_weight_ * distance;
+  if (angular_sample_radius >= .25 * boost::math::constants::pi<double>())
   {
-    double q[4];
-    rng.quaternion(q);
-    values[3] = q[0];
-    values[4] = q[1];
-    values[5] = q[2];
-    values[6] = q[3];
+    rng.quaternion(values+3);
   }
   else
   {
     // taken from OMPL
     // sample angle & axis
-    double ax = rng.gaussian01();
+    double ax = rng.gaussian01(); // Multivariate Gaussian is spherical.
     double ay = rng.gaussian01();
     double az = rng.gaussian01();
-    double angle = 2.0 * pow(rng.uniform01(), 1.0 / 3.0) * da;
+    double angle = 2.0 * pow(rng.uniform01(), 1.0 / 3.0) * angular_sample_radius;
     // convert to quaternion
     double q[4];
     double norm = sqrt(ax * ax + ay * ay + az * az);
