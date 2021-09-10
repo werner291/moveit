@@ -45,6 +45,9 @@
 #include <boost/filesystem/path.hpp>
 #include <ros/package.h>
 
+#include <moveit/collision_detection/collision_common.h>
+#include <moveit/collision_detection/collision_plugin_cache.h>
+
 TEST(PlanningScene, LoadRestore)
 {
   urdf::ModelInterfaceSharedPtr urdf_model = moveit::core::loadModelInterface("pr2");
@@ -218,77 +221,100 @@ TEST(PlanningScene, loadBadSceneGeometry)
   EXPECT_FALSE(ps->loadGeometryFromStream(malformed_scene_geometry));
 }
 
-TEST(PlanningScene, rememberMetadataWhenAttached)
+class CollisionDetectorTests : public testing::TestWithParam<const char*>
 {
-  moveit::core::RobotModelPtr robot_model(moveit::core::RobotModelBuilder("empty_robot", "base_link").build());
-  planning_scene::PlanningScene scene(robot_model);
+};
+TEST_P(CollisionDetectorTests, ClearDiff)
+{
+  const std::string plugin_name = GetParam();
+  SCOPED_TRACE(plugin_name);
 
-  // prepare planning scene message to add a colored object
-  moveit_msgs::PlanningScene scene_msg;
-  scene_msg.robot_model_name = robot_model->getName();
-  scene_msg.is_diff = true;
-  scene_msg.robot_state.is_diff = true;
+  urdf::ModelInterfaceSharedPtr urdf_model = moveit::core::loadModelInterface("pr2");
+  srdf::ModelSharedPtr srdf_model(new srdf::Model());
+  // create parent scene
+  planning_scene::PlanningScenePtr parent = std::make_shared<planning_scene::PlanningScene>(urdf_model, srdf_model);
 
+  collision_detection::CollisionPluginCache loader;
+  if (!loader.activate(plugin_name, parent, true))
+  {
+#if defined(GTEST_SKIP_)
+    GTEST_SKIP_("Failed to load collision plugin");
+#else
+    return;
+#endif
+  }
+
+  // create child scene
+  planning_scene::PlanningScenePtr child = parent->diff();
+
+  // create collision request variables
+  collision_detection::CollisionRequest req;
+  collision_detection::CollisionResult res;
+  moveit::core::RobotState* state = new moveit::core::RobotState(child->getRobotModel());
+  state->setToDefaultValues();
+  state->update();
+
+  // there should be no collision with the environment
+  res.clear();
+  parent->getCollisionEnv()->checkRobotCollision(req, res, *state, parent->getAllowedCollisionMatrix());
+  EXPECT_FALSE(res.collision);
+  res.clear();
+  child->getCollisionEnv()->checkRobotCollision(req, res, *state, child->getAllowedCollisionMatrix());
+  EXPECT_FALSE(res.collision);
+
+  // create message to add a collision object at the world origin
+  moveit_msgs::PlanningScene ps_msg;
+  ps_msg.is_diff = false;
   moveit_msgs::CollisionObject co;
   co.header.frame_id = "base_link";
-  co.id = "blue_sphere";
   co.operation = moveit_msgs::CollisionObject::ADD;
+  co.id = "box";
   co.pose.orientation.w = 1.0;
   {
-    // set valid primitive
-    shape_msgs::SolidPrimitive primitive;
-    primitive.type = shape_msgs::SolidPrimitive::SPHERE;
-    primitive.dimensions.push_back(/* SPHERE_RADIUS */ 1.0);
-    co.primitives.push_back(primitive);
-    geometry_msgs::Pose pose;
-    pose.orientation.w = 1.0;
-    co.primitive_poses.push_back(pose);
+    shape_msgs::SolidPrimitive sp;
+    sp.type = shape_msgs::SolidPrimitive::BOX;
+    sp.dimensions = { 1., 1., 1. };
+    co.primitives.push_back(sp);
+    geometry_msgs::Pose sp_pose;
+    sp_pose.orientation.w = 1.0;
+    co.primitive_poses.push_back(sp_pose);
   }
-  // meta-data 1: object type
-  co.type.key = "blue_sphere_type";
-  co.type.db = "{'type':'CustomDB'}";
-  scene_msg.world.collision_objects.push_back(co);
+  ps_msg.world.collision_objects.push_back(co);
 
-  // meta-data 2: object color
-  moveit_msgs::ObjectColor color;
-  color.id = co.id;
-  color.color.b = 1.0;
-  color.color.a = 1.0;
-  scene_msg.object_colors.push_back(color);
+  // add object to the parent planning scene
+  parent->usePlanningSceneMsg(ps_msg);
 
-  EXPECT_FALSE(scene.hasObjectColor(co.id)) << "scene knows color before adding it(?)";
-  EXPECT_FALSE(scene.hasObjectType(co.id)) << "scene knows type before adding it(?)";
+  // the parent scene should be in collision
+  res.clear();
+  parent->getCollisionEnv()->checkRobotCollision(req, res, *state, parent->getAllowedCollisionMatrix());
+  EXPECT_TRUE(res.collision);
 
-  // add object to scene
-  scene.usePlanningSceneMsg(scene_msg);
+  // the child scene was not updated yet, so no collision
+  res.clear();
+  child->getCollisionEnv()->checkRobotCollision(req, res, *state, child->getAllowedCollisionMatrix());
+  EXPECT_FALSE(res.collision);
 
-  EXPECT_TRUE(scene.hasObjectColor(co.id)) << "scene failed to add object color";
-  EXPECT_EQ(scene.getObjectColor(co.id), color.color) << "scene added wrong object color";
-  EXPECT_TRUE(scene.hasObjectType(co.id)) << "scene failed to add object type";
-  EXPECT_EQ(scene.getObjectType(co.id), co.type) << "scene added wrong object type";
+  // update the child scene
+  child->clearDiffs();
 
-  // attach object
-  moveit_msgs::AttachedCollisionObject aco;
-  aco.object.operation = moveit_msgs::CollisionObject::ADD;
-  aco.object.id = co.id;
-  aco.link_name = robot_model->getModelFrame();
-  scene.processAttachedCollisionObjectMsg(aco);
+  // child and parent scene should be in collision
+  res.clear();
+  parent->getCollisionEnv()->checkRobotCollision(req, res, *state, parent->getAllowedCollisionMatrix());
+  EXPECT_TRUE(res.collision);
+  res.clear();
+  child->getCollisionEnv()->checkRobotCollision(req, res, *state, child->getAllowedCollisionMatrix());
+  EXPECT_TRUE(res.collision);
 
-  EXPECT_EQ(scene.getObjectColor(co.id), color.color) << "scene forgot object color after it got attached";
-  EXPECT_EQ(scene.getObjectType(co.id), co.type) << "scene forgot object type after it got attached";
-
-  // trying to remove object from the scene while it is attached is expected to fail
-  co.operation = moveit_msgs::CollisionObject::REMOVE;
-  EXPECT_FALSE(scene.processCollisionObjectMsg(co))
-      << "scene removed attached object from collision world (although it's not there)";
-
-  // detach again right away
-  aco.object.operation = moveit_msgs::CollisionObject::REMOVE;
-  scene.processAttachedCollisionObjectMsg(aco);
-
-  EXPECT_EQ(scene.getObjectColor(co.id), color.color) << "scene forgot specified color after attach/detach";
-  EXPECT_EQ(scene.getObjectType(co.id), co.type) << "scene forgot specified type after attach/detach";
+  child.reset();
+  parent.reset();
 }
+
+#ifndef INSTANTIATE_TEST_SUITE_P  // prior to gtest 1.10
+#define INSTANTIATE_TEST_SUITE_P(...) INSTANTIATE_TEST_CASE_P(__VA_ARGS__)
+#endif
+
+// instantiate parameterized tests for common collision plugins
+INSTANTIATE_TEST_SUITE_P(PluginTests, CollisionDetectorTests, testing::Values("FCL", "Bullet"));
 
 int main(int argc, char** argv)
 {
